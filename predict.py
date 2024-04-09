@@ -25,7 +25,9 @@ class Predictor(BasePredictor):
     """Load the model into memory to make running multiple predictions efficient"""
     controlnet = [
         ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11p_sd15_openpose", torch_dtype=torch.float16)
+            "lllyasviel/control_v11p_sd15_openpose", 
+            torch_dtype=torch.float16, 
+            token="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")
     ]
 
     self.pipe = StableDiffusionControlNetPipeline.from_pretrained(
@@ -104,7 +106,7 @@ class Predictor(BasePredictor):
                   description="The number of images to generate",
                   default=1,
               ),
-              ) -> Path:
+              ) -> list[Path]:
     """Run a single prediction on the model"""
     self.fetch_and_save_lora(lora_s3_path, s3_access_key,
                              s3_secret_key, s3_region, s3_bucket)
@@ -128,4 +130,10 @@ class Predictor(BasePredictor):
         control_guidance_end=cn_guidance_end,
     ).images
 
-    return Path(images=images)
+    output_paths = []
+    for (i, image) in enumerate(images):
+      output_path = f"output/out-{i}.png"
+      image.save(output_path)
+      output_paths.append(Path(output_path))
+
+    return output_paths

@@ -1,0 +1,12 @@
+build:
+  gpu: true
+  cuda: "12.2"
+  python_version: "3.10.12"
+  python_packages:
+    - "diffusers==0.27.2"
+    - "peft==0.10.0"
+    - "transformers==4.39.2"
+    - "compel==2.0.2"
+    - "boto3==1.34.75"
+
+predict: "predict.py:Predictor"

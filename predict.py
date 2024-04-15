@@ -1,6 +1,8 @@
+from pathlib import Path
+import os
+import os.path
 from cog import BasePredictor, Input, Path
-import boto3
-from boto3.session import Session
+import requests
 import torch
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, DPMSolverMultistepScheduler
 from compel import Compel
@@ -8,13 +10,19 @@ from PIL import Image
 
 
 class Predictor(BasePredictor):
-  def fetch_and_save_lora(self, lora_s3_path, s3_access_key, s3_secret_key, s3_region, s3_bucket):
-    session = Session(aws_access_key_id=s3_access_key,
-                      aws_secret_access_key=s3_secret_key,
-                      region_name=s3_region)
-    s3 = session.client('s3')
-    s3.download_file(s3_bucket, lora_s3_path,
-                     f"./loras/{lora_s3_path.split('/')[-1]}")
+  def fetch_and_save_lora(self, lora_url):
+    # Check if loras folder exists and the file is already there
+    Path.mkdir(Path("./loras"), exist_ok=True)
+
+    loras_cnt = len([name for name in os.listdir('./loras')
+                    if os.path.isfile(os.path.join('./loras', name))])
+    dest = f"./loras/lora-{loras_cnt+1}.safetensors"
+    resp = requests.get(lora_url)
+
+    with open(dest, 'wb') as f:
+      f.write(resp.content)
+
+    return dest
 
   def load_cn_pose_img(self, index=7, resize=(512, 768)):
     if (index < 1 or index > 12):
@@ -25,8 +33,8 @@ class Predictor(BasePredictor):
     """Load the model into memory to make running multiple predictions efficient"""
     controlnet = [
         ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11p_sd15_openpose", 
-            torch_dtype=torch.float16, 
+            "lllyasviel/control_v11p_sd15_openpose",
+            torch_dtype=torch.float16,
             token="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")
     ]
 
@@ -44,11 +52,15 @@ class Predictor(BasePredictor):
   def predict(self,
               prompt: str = Input(
                   description="The prompt to generate images from",
-                  default="A girl with a (black shirt)++ and (blue jeans)--",
+                  default="realistic, hyperrealism, best quality, masterpiece, ultra high res, photorealistic++++, (beautiful eyes)++, (soft lighting), portrait, (upper body), a wonderful photo of girl, wearing gorgeous dress on high class party",
               ),
               neg_prompt: str = Input(
                   description="The negative prompt to generate images from",
-                  default="cartoon++, (low quality)++"
+                  default="(worst quality)++++, (low quality)++++, (normal quality)++, (bad skin)++, disfigured, cartoon, painting, illustration, nsfw"
+              ),
+              num_of_imgs: int = Input(
+                  description="The number of images to generate",
+                  default=1,
               ),
               width: int = Input(
                   description="The width of the generated image",
@@ -59,10 +71,10 @@ class Predictor(BasePredictor):
                   default=768,
               ),
               pose_img_index: int = Input(
-                  description="The index of the pose image to use",
+                  description="The index of the pose image to use. More info: https://civitai.com/models/256902/openpose-portrait-poses",
                   ge=1,
                   le=12,
-                  default=7,
+                  default=8,
               ),
               cn_guidance_strength: float = Input(
                   description="The strength of the pose guidance",
@@ -82,41 +94,44 @@ class Predictor(BasePredictor):
                   le=1.0,
                   default=0.25,
               ),
-              lora_s3_path: str = Input(
-                  description="The Amazon S3 path of the LoRA safetensors file",
+              loras_url: str = Input(
+                  description="List of LoRA safetensors url and weights formatted as: [url/to/lora1.safetensors|0.6], [url/to/lora2.safetensors|0.4]",
                   default=None,
-              ),
-              s3_access_key: str = Input(
-                  description="The Amazon S3 access key",
-                  default=None,
-              ),
-              s3_secret_key: str = Input(
-                  description="The Amazon S3 secret key",
-                  default=None,
-              ),
-              s3_region: str = Input(
-                  description="The Amazon S3 region",
-                  default=None,
-              ),
-              s3_bucket: str = Input(
-                  description="The Amazon S3 bucket name",
-                  default=None,
-              ),
-              num_of_imgs: int = Input(
-                  description="The number of images to generate",
-                  default=1,
-              ),
+              )
               ) -> list[Path]:
     """Run a single prediction on the model"""
-    self.fetch_and_save_lora(lora_s3_path, s3_access_key,
-                             s3_secret_key, s3_region, s3_bucket)
 
-    self.pipe.load_lora_weights(f"./loras/{lora_s3_path.split('/')[-1]}")
+    loras_url = loras_url.replace(" ", "")
+    lora_urls = [l.split('|')[0][1:] for l in loras_url.split(",")]
+    lora_weights = [float(l.split('|')[1][:-1]) for l in loras_url.split(",")]
 
+    print(len(lora_urls), 'LoRA URLs:', lora_urls)
+    print(len(lora_weights), 'LoRA weights:', lora_weights)
+
+    # fetch LoRAs from s3
+    lora_paths = []
+    print('Fetching LoRAs from URLs...')
+    for lora in lora_urls:
+      lora_paths.append(self.fetch_and_save_lora(lora))
+
+    # set LoRA weights
+    print('Setting LoRA weights...')
+    for i, lora_path in enumerate(lora_paths):
+      self.pipe.load_lora_weights(
+          lora_path, adapter_name=str(i))
+    self.pipe.set_adapters([str(i) for i in range(
+        len(lora_paths))], adapter_weights=lora_weights)
+
+    # set prompt and negative prompt embeddings
     prompt_embeds = self.compel_proc([prompt]*num_of_imgs)
     neg_prompt_embeds = self.compel_proc([neg_prompt]*num_of_imgs)
+
+    # load pose image
+    print('Loading pose image...')
     cn_img = self.load_cn_pose_img(pose_img_index, (width, height))
 
+    # generate images
+    print('Generating images...')
     images = self.pipe(
         prompt_embeds=prompt_embeds,
         negative_prompt_embeds=neg_prompt_embeds,
@@ -128,12 +143,19 @@ class Predictor(BasePredictor):
         controlnet_conditioning_scale=cn_guidance_strength,
         control_guidance_start=cn_guidance_start,
         control_guidance_end=cn_guidance_end,
+        cross_attention_kwargs={"scale": 1},
     ).images
 
+    # unload LoRAs
+    # if not unloaded, the next prediction will use the same LoRAs
+    self.pipe.unload_lora_weights()
+
+    Path.mkdir(Path("./output"), exist_ok=True)
     output_paths = []
     for (i, image) in enumerate(images):
-      output_path = f"output/out-{i}.png"
+      output_path = f"./output/out-{i}.png"
       image.save(output_path)
       output_paths.append(Path(output_path))
 
+    print('Images generated successfully!')
     return output_paths
